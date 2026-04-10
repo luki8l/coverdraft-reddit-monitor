@@ -1,6 +1,6 @@
 /**
- * Reddit API client — no auth required, uses public JSON endpoints.
- * Fetches recent posts from job-seeker subreddits and scores relevance.
+ * Reddit API client — uses OAuth2 Client Credentials (no user login needed).
+ * Requires REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET env vars.
  */
 
 const SUBREDDITS = [
@@ -46,15 +46,67 @@ const KEYWORDS = [
   'stellenbewerbung',
 ];
 
-const USER_AGENT = 'CoverDraft-Monitor/1.0 (automated digest; contact hello@coverdraft.app)';
+// Must follow Reddit's required format: platform:appId:version (by /u/username)
+const USER_AGENT = process.env.REDDIT_USER_AGENT ||
+  'node:coverdraft-monitor:1.0.0 (by /u/coverdraft_app)';
+
+let _accessToken = null;
+let _tokenExpiry = 0;
+
+/**
+ * Get a valid OAuth access token, refreshing if needed.
+ */
+async function getAccessToken() {
+  if (_accessToken && Date.now() < _tokenExpiry) return _accessToken;
+
+  const clientId = process.env.REDDIT_CLIENT_ID;
+  const clientSecret = process.env.REDDIT_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      'Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET. ' +
+      'Create a Reddit app at https://www.reddit.com/prefs/apps (type: script)'
+    );
+  }
+
+  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+  const res = await fetch('https://www.reddit.com/api/v1/access_token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      'User-Agent': USER_AGENT,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Reddit OAuth failed (${res.status}): ${text}`);
+  }
+
+  const data = await res.json();
+  _accessToken = data.access_token;
+  // Expire 60s early to be safe
+  _tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+
+  console.log('[reddit] OAuth token obtained');
+  return _accessToken;
+}
 
 /**
  * Fetch up to `limit` new posts from a subreddit.
  */
 async function fetchSubreddit(subreddit, limit = 25) {
-  const url = `https://www.reddit.com/r/${subreddit}/new.json?limit=${limit}`;
+  const token = await getAccessToken();
+  const url = `https://oauth.reddit.com/r/${subreddit}/new?limit=${limit}`;
+
   const res = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'User-Agent': USER_AGENT,
+    },
   });
 
   if (!res.ok) {
