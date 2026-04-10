@@ -2,14 +2,15 @@
  * CoverDraft Reddit Monitor — main entry point.
  *
  * Pipeline:
- *   1. Fetch recent posts from 9 job-seeker subreddits (Reddit JSON API, no auth)
- *   2. Keyword-filter for cover letter / job application topics
- *   3. Score relevance 0–10 with Claude Haiku (filter < 5)
- *   4. Generate a human-sounding reply suggestion per post
- *   5. Send HTML digest email via Resend
+ *   1. Find relevant Reddit posts via Google Custom Search (site:reddit.com + keywords)
+ *   2. Score relevance 0–10 with Claude Haiku (filter < 5)
+ *   3. Generate a human-sounding reply suggestion per post
+ *   4. Send HTML digest email via Resend
  *
  * Environment variables required:
  *   ANTHROPIC_API_KEY   — Anthropic API key
+ *   GOOGLE_API_KEY      — Google Cloud API key (Custom Search API enabled)
+ *   GOOGLE_CSE_ID       — Google Custom Search Engine ID (cx)
  *   RESEND_API_KEY      — Resend API key
  *   ALERT_EMAIL         — recipient email address
  *   FROM_EMAIL          — (optional) sender address, default: hello@coverdraft.app
@@ -17,7 +18,7 @@
  * Set DRY_RUN=true to skip sending email and print results to stdout.
  */
 
-import { fetchRelevantPosts, formatPost } from './reddit.js';
+import { fetchRelevantPosts, formatPost, SEARCH_QUERIES_COUNT } from './reddit.js';
 import { enrichPosts } from './claude.js';
 import { sendDigest, sendEmptyDigest } from './email.js';
 
@@ -31,7 +32,7 @@ async function main() {
   if (DRY_RUN) console.log('[mode] DRY RUN — email will not be sent');
 
   // Validate required env vars
-  const required = ['ANTHROPIC_API_KEY', 'RESEND_API_KEY', 'ALERT_EMAIL'];
+  const required = ['ANTHROPIC_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_CSE_ID', 'RESEND_API_KEY', 'ALERT_EMAIL'];
   const missing = required.filter((k) => !process.env[k]);
   if (missing.length) {
     console.error(`Missing required environment variables: ${missing.join(', ')}`);
@@ -40,13 +41,13 @@ async function main() {
 
   // Step 1: Fetch + keyword-filter
   console.log('\n[1/3] Fetching Reddit posts…');
-  const rawPosts = await fetchRelevantPosts(25);
-  console.log(`      → ${rawPosts.length} keyword-relevant posts found`);
+  const rawPosts = await fetchRelevantPosts();
+  console.log(`      → ${rawPosts.length} posts found`);
 
   const posts = rawPosts.map(formatPost);
 
   const stats = {
-    subredditsScanned: 9,
+    subredditsScanned: SEARCH_QUERIES_COUNT,
     totalFetched: rawPosts.length,
   };
 

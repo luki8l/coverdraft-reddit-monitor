@@ -1,130 +1,113 @@
 /**
- * Reddit RSS client — uses public RSS feeds, no API key or auth required.
- * RSS feeds are separate from Reddit's Data API and remain publicly accessible.
+ * Reddit post finder via Google Custom Search API.
+ *
+ * Instead of hitting Reddit directly (blocked from data-center IPs),
+ * we search Google for site:reddit.com + relevant keywords.
+ * Free tier: 100 queries/day — we use ~8.
+ *
+ * Setup: https://developers.google.com/custom-search/v1/introduction
+ *   1. Create API key at https://console.cloud.google.com (Custom Search API)
+ *   2. Create a search engine at https://cse.google.com — set "Search the entire web"
+ *   3. Copy the cx (Search engine ID)
  */
 
-import Parser from 'rss-parser';
-
-const SUBREDDITS = [
-  'jobs',
-  'careerguidance',
-  'resumes',
-  'jobsearch',
-  'cscareerquestions',
-  'recruitinghell',
-  'germany',
-  'austria',
-  'Finanzen',
+// Each entry becomes one Google search: site:reddit.com <query>
+// Grouped to stay well within the 100/day free tier.
+const SEARCH_QUERIES = [
+  '"cover letter" help',
+  '"cover letter" AI OR generator OR tool',
+  '"resume help" OR "cv help"',
+  '"job application" advice OR help',
+  '"motivation letter" OR "motivationsschreiben"',
+  'bewerbungsschreiben OR anschreiben hilfe',
+  '"ki bewerbung" OR "bewerbung ki" OR bewerbungsgenerator',
+  '"cover letter" example OR template OR tips',
 ];
 
-const KEYWORDS = [
-  // English
-  'cover letter',
-  'covering letter',
-  'application letter',
-  'job application',
-  'resume help',
-  'cv help',
-  'ai cover letter',
-  'cover letter generator',
-  'cover letter tool',
-  'cover letter template',
-  'cover letter tips',
-  'write cover letter',
-  'cover letter example',
-  'motivation letter',
-  'motivationsschreiben',
-  // German
-  'bewerbungsschreiben',
-  'bewerbung schreiben',
-  'anschreiben',
-  'lebenslauf hilfe',
-  'ki bewerbung',
-  'bewerbung ki',
-  'bewerbung tool',
-  'bewerbungshelfer',
-  'bewerbungsgenerator',
-  'job bewerbung',
-  'stellenbewerbung',
-];
+export const SEARCH_QUERIES_COUNT = SEARCH_QUERIES.length;
 
-const parser = new Parser({
-  headers: {
-    'User-Agent': 'Mozilla/5.0 (compatible; CoverDraft-Monitor/1.0; +https://coverdraft.app)',
-  },
-  timeout: 10000,
-});
+const CSE_ENDPOINT = 'https://www.googleapis.com/customsearch/v1';
 
 /**
- * Fetch up to 25 new posts from a subreddit via RSS.
+ * Run one Google CSE query and return raw result items.
  */
-async function fetchSubreddit(subreddit) {
-  const url = `https://www.reddit.com/r/${subreddit}/new.rss?limit=25`;
+async function searchGoogle(query) {
+  const params = new URLSearchParams({
+    key: process.env.GOOGLE_API_KEY,
+    cx: process.env.GOOGLE_CSE_ID,
+    q: `site:reddit.com ${query}`,
+    dateRestrict: 'd2',   // last 48 hours
+    num: '10',
+  });
 
-  const feed = await parser.parseURL(url);
+  const res = await fetch(`${CSE_ENDPOINT}?${params}`);
 
-  return (feed.items || []).map((item) => ({
-    id: item.id || item.guid || item.link,
-    subreddit,
-    title: item.title || '',
-    // RSS body is HTML — strip tags for plain text
-    selftext: (item.content || item.contentSnippet || item['content:encoded'] || '')
-      .replace(/<[^>]*>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim(),
-    permalink: item.link || '',
-    score: 0,       // not available in RSS
+  if (res.status === 429) {
+    console.warn('[google] Rate limit hit — skipping query');
+    return [];
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Google CSE ${res.status}: ${body.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  return data.items || [];
+}
+
+/**
+ * Convert a Google CSE result item to our post format.
+ */
+function itemToPost(item) {
+  const subredditMatch = item.link?.match(/reddit\.com\/r\/([^/]+)/);
+  return {
+    id: item.link,
+    subreddit: subredditMatch?.[1] ?? 'reddit',
+    title: item.title?.replace(/\s*:\s*reddit$/, '').trim() || '',
+    selftext: item.snippet || '',
+    permalink: item.link,
+    score: 0,
     num_comments: 0,
-    author: item.author || item.creator || 'unknown',
-    created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
-  }));
+    author: 'unknown',
+    created_utc: Math.floor(Date.now() / 1000),
+  };
 }
 
 /**
- * Check whether a post is relevant based on keyword matching.
- */
-function isRelevant(post) {
-  const text = `${post.title} ${post.selftext}`.toLowerCase();
-  return KEYWORDS.some((kw) => text.includes(kw));
-}
-
-/**
- * Fetch and filter relevant posts from all monitored subreddits.
+ * Fetch relevant Reddit posts via Google Custom Search.
  */
 export async function fetchRelevantPosts() {
   const results = [];
 
-  for (const sub of SUBREDDITS) {
+  for (const query of SEARCH_QUERIES) {
     try {
-      const posts = await fetchSubreddit(sub);
-      const relevant = posts.filter(isRelevant);
-      console.log(`[reddit] r/${sub}: ${posts.length} posts fetched, ${relevant.length} relevant`);
-      results.push(...relevant);
+      const items = await searchGoogle(query);
+      // Filter: only actual Reddit post pages (not subreddit/user/wiki pages)
+      const posts = items
+        .filter((i) => /reddit\.com\/r\/\w+\/comments\//.test(i.link))
+        .map(itemToPost);
+
+      console.log(`[google] "${query}": ${items.length} results, ${posts.length} post links`);
+      results.push(...posts);
     } catch (err) {
-      console.warn(`[reddit] Error fetching r/${sub}:`, err.message);
+      console.warn(`[google] Query failed — "${query}":`, err.message);
     }
 
-    // Polite delay between requests
-    await new Promise((r) => setTimeout(r, 600));
+    // Stay polite with the API
+    await new Promise((r) => setTimeout(r, 300));
   }
 
-  // Deduplicate by post ID
+  // Deduplicate by URL
   const seen = new Set();
-  const unique = results.filter((p) => {
-    const key = p.id || p.permalink;
-    if (seen.has(key)) return false;
-    seen.add(key);
+  return results.filter((p) => {
+    if (seen.has(p.id)) return false;
+    seen.add(p.id);
     return true;
   });
-
-  // Sort newest first (score not available in RSS), take top 30
-  return unique
-    .sort((a, b) => b.created_utc - a.created_utc)
-    .slice(0, 30);
 }
 
 /**
- * Format a post for display / AI input.
+ * Format a post for display / AI input (passthrough — already in correct shape).
  */
 export function formatPost(post) {
   return {
@@ -136,8 +119,6 @@ export function formatPost(post) {
     score: post.score,
     comments: post.num_comments,
     author: post.author,
-    created: post.created_utc
-      ? new Date(post.created_utc * 1000).toISOString()
-      : new Date().toISOString(),
+    created: new Date(post.created_utc * 1000).toISOString(),
   };
 }
