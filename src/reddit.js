@@ -1,18 +1,17 @@
 /**
  * Reddit post finder via Google Custom Search API.
  *
- * Instead of hitting Reddit directly (blocked from data-center IPs),
- * we search Google for site:reddit.com + relevant keywords.
+ * CSE is configured to search reddit.com/* only.
  * Free tier: 100 queries/day — we use ~8.
  *
  * Setup: https://developers.google.com/custom-search/v1/introduction
- *   1. Create API key at https://console.cloud.google.com (Custom Search API)
- *   2. Create a search engine at https://cse.google.com — set "Search the entire web"
- *   3. Copy the cx (Search engine ID)
+ *   1. Enable "Custom Search API" at https://console.cloud.google.com
+ *   2. Create a search engine at https://cse.google.com
+ *      → Add site: reddit.com/*
+ *   3. Add GOOGLE_API_KEY + GOOGLE_CSE_ID to env / GitHub Secrets
  */
 
-// Each entry becomes one Google search: site:reddit.com <query>
-// Grouped to stay well within the 100/day free tier.
+// Each entry becomes one Google search within reddit.com
 const SEARCH_QUERIES = [
   '"cover letter" help',
   '"cover letter" AI OR generator OR tool',
@@ -35,7 +34,7 @@ async function searchGoogle(query) {
   const params = new URLSearchParams({
     key: process.env.GOOGLE_API_KEY,
     cx: process.env.GOOGLE_CSE_ID,
-    q: `site:reddit.com ${query}`,
+    q: query,
     dateRestrict: 'd2',   // last 48 hours
     num: '10',
   });
