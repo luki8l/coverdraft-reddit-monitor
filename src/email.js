@@ -4,7 +4,12 @@
 
 import { Resend } from 'resend';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Resend is only instantiated when actually sending (not in dry-run mode)
+let resend;
+function getResend() {
+  if (!resend) resend = new Resend(process.env.RESEND_API_KEY);
+  return resend;
+}
 const TO = process.env.ALERT_EMAIL;
 const FROM = `CoverDraft Monitor <${process.env.FROM_EMAIL || 'hello@coverdraft.app'}>`;
 
@@ -107,7 +112,7 @@ export async function sendDigest(posts, stats) {
 
   const subject = `🎯 ${posts.length} Reddit thread${posts.length !== 1 ? 's' : ''} to engage with today`;
 
-  const { data, error } = await resend.emails.send({
+  const { data, error } = await getResend().emails.send({
     from: FROM,
     to: TO,
     subject,
@@ -125,7 +130,7 @@ export async function sendDigest(posts, stats) {
  * Send a "nothing found today" notification.
  */
 export async function sendEmptyDigest(stats) {
-  const { error } = await resend.emails.send({
+  const { error } = await getResend().emails.send({
     from: FROM,
     to: TO,
     subject: '📭 Reddit Monitor: No relevant threads today',

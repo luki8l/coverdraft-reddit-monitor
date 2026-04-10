@@ -1,7 +1,9 @@
 /**
- * Reddit API client — uses OAuth2 Client Credentials (no user login needed).
- * Requires REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET env vars.
+ * Reddit RSS client — uses public RSS feeds, no API key or auth required.
+ * RSS feeds are separate from Reddit's Data API and remain publicly accessible.
  */
+
+import Parser from 'rss-parser';
 
 const SUBREDDITS = [
   'jobs',
@@ -46,76 +48,36 @@ const KEYWORDS = [
   'stellenbewerbung',
 ];
 
-// Must follow Reddit's required format: platform:appId:version (by /u/username)
-const USER_AGENT = process.env.REDDIT_USER_AGENT ||
-  'node:coverdraft-monitor:1.0.0 (by /u/coverdraft_app)';
-
-let _accessToken = null;
-let _tokenExpiry = 0;
-
-/**
- * Get a valid OAuth access token, refreshing if needed.
- */
-async function getAccessToken() {
-  if (_accessToken && Date.now() < _tokenExpiry) return _accessToken;
-
-  const clientId = process.env.REDDIT_CLIENT_ID;
-  const clientSecret = process.env.REDDIT_CLIENT_SECRET;
-
-  if (!clientId || !clientSecret) {
-    throw new Error(
-      'Missing REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET. ' +
-      'Create a Reddit app at https://www.reddit.com/prefs/apps (type: script)'
-    );
-  }
-
-  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-
-  const res = await fetch('https://www.reddit.com/api/v1/access_token', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${credentials}`,
-      'User-Agent': USER_AGENT,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Reddit OAuth failed (${res.status}): ${text}`);
-  }
-
-  const data = await res.json();
-  _accessToken = data.access_token;
-  // Expire 60s early to be safe
-  _tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-
-  console.log('[reddit] OAuth token obtained');
-  return _accessToken;
-}
+const parser = new Parser({
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (compatible; CoverDraft-Monitor/1.0; +https://coverdraft.app)',
+  },
+  timeout: 10000,
+});
 
 /**
- * Fetch up to `limit` new posts from a subreddit.
+ * Fetch up to 25 new posts from a subreddit via RSS.
  */
-async function fetchSubreddit(subreddit, limit = 25) {
-  const token = await getAccessToken();
-  const url = `https://oauth.reddit.com/r/${subreddit}/new?limit=${limit}`;
+async function fetchSubreddit(subreddit) {
+  const url = `https://www.reddit.com/r/${subreddit}/new.rss?limit=25`;
 
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'User-Agent': USER_AGENT,
-    },
-  });
+  const feed = await parser.parseURL(url);
 
-  if (!res.ok) {
-    console.warn(`[reddit] r/${subreddit} returned ${res.status} — skipping`);
-    return [];
-  }
-
-  const json = await res.json();
-  return json?.data?.children?.map((c) => c.data) ?? [];
+  return (feed.items || []).map((item) => ({
+    id: item.id || item.guid || item.link,
+    subreddit,
+    title: item.title || '',
+    // RSS body is HTML — strip tags for plain text
+    selftext: (item.content || item.contentSnippet || item['content:encoded'] || '')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    permalink: item.link || '',
+    score: 0,       // not available in RSS
+    num_comments: 0,
+    author: item.author || item.creator || 'unknown',
+    created_utc: item.pubDate ? Math.floor(new Date(item.pubDate).getTime() / 1000) : 0,
+  }));
 }
 
 /**
@@ -128,14 +90,13 @@ function isRelevant(post) {
 
 /**
  * Fetch and filter relevant posts from all monitored subreddits.
- * Returns posts sorted by score (upvotes) descending.
  */
-export async function fetchRelevantPosts(maxPerSubreddit = 25) {
+export async function fetchRelevantPosts() {
   const results = [];
 
   for (const sub of SUBREDDITS) {
     try {
-      const posts = await fetchSubreddit(sub, maxPerSubreddit);
+      const posts = await fetchSubreddit(sub);
       const relevant = posts.filter(isRelevant);
       console.log(`[reddit] r/${sub}: ${posts.length} posts fetched, ${relevant.length} relevant`);
       results.push(...relevant);
@@ -144,19 +105,22 @@ export async function fetchRelevantPosts(maxPerSubreddit = 25) {
     }
 
     // Polite delay between requests
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 600));
   }
 
   // Deduplicate by post ID
   const seen = new Set();
   const unique = results.filter((p) => {
-    if (seen.has(p.id)) return false;
-    seen.add(p.id);
+    const key = p.id || p.permalink;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 
-  // Sort by score descending, take top 30
-  return unique.sort((a, b) => b.score - a.score).slice(0, 30);
+  // Sort newest first (score not available in RSS), take top 30
+  return unique
+    .sort((a, b) => b.created_utc - a.created_utc)
+    .slice(0, 30);
 }
 
 /**
@@ -168,10 +132,12 @@ export function formatPost(post) {
     subreddit: post.subreddit,
     title: post.title,
     body: post.selftext?.slice(0, 800) || '',
-    url: `https://reddit.com${post.permalink}`,
+    url: post.permalink,
     score: post.score,
     comments: post.num_comments,
     author: post.author,
-    created: new Date(post.created_utc * 1000).toISOString(),
+    created: post.created_utc
+      ? new Date(post.created_utc * 1000).toISOString()
+      : new Date().toISOString(),
   };
 }
